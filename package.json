@@ -1,0 +1,41 @@
+{
+  "name": "agentpays-sdk",
+  "version": "2.0.0",
+  "description": "AgentPays SDK — crypto spending limits for AI agents",
+  "author": "AgentPays",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agentpays",
+    "crypto",
+    "payments",
+    "ai-agents",
+    "spending-limits",
+    "usdc",
+    "ethereum",
+    "sdk",
+    "web3"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TzBaker/agentpays-sdk.git"
+  },
+  "homepage": "https://github.com/TzBaker/agentpays-sdk#readme"
+}
