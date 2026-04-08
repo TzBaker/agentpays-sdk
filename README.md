@@ -135,11 +135,11 @@ if (!result.approved) {
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `AGENTPAYS_AGENT_ID` | Agent ID |
-| `AGENTPAYS_API_KEY` | API key (`apk_live_...`) |
-| `AGENTPAYS_BASE_URL` | Server URL (default: `https://agentpays.app`) |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AGENTPAYS_AGENT_ID` | ✅ | Your AgentPays agent ID |
+| `AGENTPAYS_API_KEY` | ✅ | Your AgentPays API key |
+| `AGENTPAYS_BASE_URL` | ❌ | Server URL (default: `https://agentpays.app`) |
 
 Legacy names also supported: `AGENTPAY_AGENT_ID`, `AGENTPAY_KEY`, `AGENTPAY_URL`.
 
