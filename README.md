@@ -18,7 +18,7 @@ import { AgentPays } from "agentpays-sdk";
 const pay = new AgentPays({
   agentId: "your-agent-id",
   apiKey: "apk_live_...",
-  baseUrl: "https://your-server.com",
+  baseUrl: "https://agentpays.app",
 });
 
 // Check if you can spend (dry-run, no money moved)
@@ -139,7 +139,7 @@ if (!result.approved) {
 |----------|-------------|
 | `AGENTPAYS_AGENT_ID` | Agent ID |
 | `AGENTPAYS_API_KEY` | API key (`apk_live_...`) |
-| `AGENTPAYS_BASE_URL` | Server URL (default: `http://localhost:3000`) |
+| `AGENTPAYS_BASE_URL` | Server URL (default: `https://agentpays.app`) |
 
 Legacy names also supported: `AGENTPAY_AGENT_ID`, `AGENTPAY_KEY`, `AGENTPAY_URL`.
 
