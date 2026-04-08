@@ -27,6 +27,8 @@ export type SpendErrorCode =
   | 'NOT_FOUND'
   | 'INTERNAL_ERROR'
   | 'EXECUTION_FAILED'
+  | 'INSUFFICIENT_GAS'
+  | 'INSUFFICIENT_BALANCE'
   | 'TIMEOUT'
   | 'NETWORK_ERROR'
 
@@ -57,6 +59,10 @@ export type SpendResult =
       txId: string
       txHash?: string
       remainingBudget?: number
+      /** 'vault' if executed through on-chain vault, 'direct' for legacy mode */
+      spendMode?: 'vault' | 'direct'
+      /** Vault contract address (set when spendMode='vault') */
+      vaultAddress?: string
     }
   | {
       approved: false
@@ -125,6 +131,27 @@ export interface TransactionRecord {
   reason: string | null
   metadata: unknown
   createdAt: string
+  spendMode?: string | null
+  vaultAddress?: string | null
+}
+
+// ─── Operator vault types ─────────────────────────────────────────────────────
+
+export interface VaultInfo {
+  id: string
+  chainId: number
+  vaultAddress: string
+  isActive: boolean
+  lastSyncedAt: string | null
+  deployedAt: string
+}
+
+export interface VaultBalance {
+  symbol: string
+  tokenAddress: string | null
+  balance: number
+  balanceRaw: string
+  decimals: number
 }
 
 // ─── SDK options ──────────────────────────────────────────────────────────────
@@ -161,7 +188,7 @@ export class AgentPays {
 
     this.agentId      = opts.agentId
     this.apiKey       = opts.apiKey
-    this.baseUrl      = (opts.baseUrl ?? 'http://localhost:3000').replace(/\/$/, '')
+    this.baseUrl      = (opts.baseUrl ?? 'https://agentpays.app').replace(/\/$/, '')
     this.timeoutMs    = opts.timeoutMs ?? 30_000
     this.debug        = opts.debug ?? false
     this.retries      = opts.retries ?? 2
@@ -172,7 +199,7 @@ export class AgentPays {
    * Initialise from environment variables.
    *   AGENTPAYS_AGENT_ID — required
    *   AGENTPAYS_API_KEY  — required
-   *   AGENTPAYS_BASE_URL — optional (default: http://localhost:3000)
+   *   AGENTPAYS_BASE_URL — optional (default: https://agentpays.app)
    *   AGENTPAYS_DEBUG    — optional ("true" / "1")
    */
   static fromEnv(overrides?: Partial<AgentPaysOptions>): AgentPays {
@@ -274,7 +301,8 @@ export class AgentPays {
 
     const data = await res.json() as {
       approved: boolean; txId: string; txHash?: string; reason?: string;
-      code?: SpendErrorCode; retryable?: boolean; remainingBudget?: number
+      code?: SpendErrorCode; retryable?: boolean; remainingBudget?: number;
+      spendMode?: string; vaultAddress?: string
     }
 
     if (!data.approved) {
@@ -286,7 +314,14 @@ export class AgentPays {
         retryable: data.retryable ?? false,
       }
     }
-    return { approved: true, txId: data.txId, txHash: data.txHash, remainingBudget: data.remainingBudget }
+    return {
+      approved: true,
+      txId: data.txId,
+      txHash: data.txHash,
+      remainingBudget: data.remainingBudget,
+      spendMode: data.spendMode as 'vault' | 'direct' | undefined,
+      vaultAddress: data.vaultAddress,
+    }
   }
 
   /**
@@ -455,10 +490,154 @@ function _makeErrorResponse(status: number, code: SpendErrorCode, error: string)
   })
 }
 
+// ─── Operator SDK ─────────────────────────────────────────────────────────────
+
+export interface OperatorOptions {
+  baseUrl?: string
+  /** Operator auth token (SIWE / session token) */
+  authToken: string
+  timeoutMs?: number
+}
+
+/**
+ * Operator-side SDK for managing vaults, deposits, and wallet funding.
+ * Uses operator auth (SIWE token), not agent API keys.
+ */
+export class AgentPaysOperator {
+  private readonly baseUrl: string
+  private readonly authToken: string
+  private readonly timeoutMs: number
+
+  constructor(opts: OperatorOptions) {
+    if (!opts.authToken) throw new Error('AgentPaysOperator: authToken is required')
+    this.baseUrl = (opts.baseUrl ?? 'https://agentpays.app').replace(/\/$/, '')
+    this.authToken = opts.authToken
+    this.timeoutMs = opts.timeoutMs ?? 30_000
+  }
+
+  private async _fetch(path: string, opts: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs)
+    try {
+      return await fetch(`${this.baseUrl}${path}`, {
+        ...opts,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.authToken}`,
+          ...(opts.headers as Record<string, string> | undefined),
+        },
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /** List all vaults for this operator. */
+  async getVaults(): Promise<VaultInfo[]> {
+    const res = await this._fetch('/api/vaults')
+    if (!res.ok) throw new Error(`getVaults failed: HTTP ${res.status}`)
+    const data = await res.json() as { vaults: VaultInfo[] }
+    return data.vaults
+  }
+
+  /** Get a single vault by ID. */
+  async getVault(id: string): Promise<VaultInfo> {
+    const res = await this._fetch(`/api/vaults/${id}`)
+    if (!res.ok) throw new Error(`getVault failed: HTTP ${res.status}`)
+    const data = await res.json() as { vault: VaultInfo }
+    return data.vault
+  }
+
+  /**
+   * Register a vault that was deployed client-side by the operator's browser wallet.
+   * The operator deploys via factory.deployVault() on-chain, then saves the result here.
+   */
+  async registerVault(params: {
+    chainId: number
+    vaultAddress: string
+    factoryAddress: string
+    txHash: string
+  }): Promise<VaultInfo> {
+    const res = await this._fetch('/api/vaults', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as Record<string, unknown>
+      throw new Error(String(err.error ?? `registerVault failed: HTTP ${res.status}`))
+    }
+    const data = await res.json() as { vault: VaultInfo }
+    return data.vault
+  }
+
+  /** Deposit funds into a vault. */
+  async depositToVault(vaultId: string, walletId: string, currencySymbol: string, amount: number): Promise<{ txHash: string; depositId: string }> {
+    const res = await this._fetch(`/api/vaults/${vaultId}/deposit`, {
+      method: 'POST',
+      body: JSON.stringify({ walletId, currencySymbol, amount }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as Record<string, unknown>
+      throw new Error(String(err.error ?? `depositToVault failed: HTTP ${res.status}`))
+    }
+    return res.json() as Promise<{ txHash: string; depositId: string }>
+  }
+
+  /** Get vault on-chain balances. */
+  async getVaultBalances(vaultId: string): Promise<VaultBalance[]> {
+    const res = await this._fetch(`/api/vaults/${vaultId}/balances`)
+    if (!res.ok) throw new Error(`getVaultBalances failed: HTTP ${res.status}`)
+    const data = await res.json() as { balances: VaultBalance[] }
+    return data.balances
+  }
+
+  /** Pause or unpause a vault. */
+  async pauseVault(vaultId: string, paused: boolean, walletId: string): Promise<VaultInfo> {
+    const res = await this._fetch(`/api/vaults/${vaultId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ paused, isActive: !paused, walletId }),
+    })
+    if (!res.ok) throw new Error(`pauseVault failed: HTTP ${res.status}`)
+    const data = await res.json() as { vault: VaultInfo }
+    return data.vault
+  }
+
+  /** Sync wallet limits to the on-chain vault contract. */
+  async syncVaultLimits(vaultId: string, walletId: string): Promise<{ txCount: number }> {
+    const res = await this._fetch(`/api/vaults/${vaultId}/sync`, {
+      method: 'POST',
+      body: JSON.stringify({ walletId }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as Record<string, unknown>
+      throw new Error(String(err.error ?? `syncVaultLimits failed: HTTP ${res.status}`))
+    }
+    return res.json() as Promise<{ txCount: number }>
+  }
+
+  /** Fund a wallet directly (legacy mode — not through vault). */
+  async fundWallet(walletId: string, toAddress: string, currencySymbol: string, amount: number): Promise<{ txHash: string; explorerUrl: string }> {
+    const res = await this._fetch(`/api/wallets/${walletId}/fund`, {
+      method: 'POST',
+      body: JSON.stringify({ toAddress, amount, currencySymbol }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({})) as Record<string, unknown>
+      throw new Error(String(err.error ?? `fundWallet failed: HTTP ${res.status}`))
+    }
+    return res.json() as Promise<{ txHash: string; explorerUrl: string }>
+  }
+}
+
 // ─── Convenience factory ──────────────────────────────────────────────────────
 
 export function createAgentPays(opts: AgentPaysOptions): AgentPays {
   return new AgentPays(opts)
+}
+
+export function createAgentPaysOperator(opts: OperatorOptions): AgentPaysOperator {
+  return new AgentPaysOperator(opts)
 }
 
 export default AgentPays
